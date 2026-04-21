@@ -91,7 +91,10 @@ livekit:
   #   key name  → public API key ID  (your hex-16 value)
   #   key value → JWT signing secret (your hex-32 value)
   # Generate and create this secret with the command in README §2.
-  keySecret: livekit-api-keys
+  storeKeysInSecret:
+    enabled: true                        # Must be true to use secret-based keys
+    existingSecret: "livekit-api-keys"   # Exact name of the secret you created
+    keys: {} 
 
   # Embedded TURN is disabled — STUNner handles TURN relay externally.
   turn:

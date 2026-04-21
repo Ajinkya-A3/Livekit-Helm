@@ -32,7 +32,7 @@ Components:
 an ALB Ingress on top of kgateway would duplicate routing and conflict with your
 HTTPRoute. The chart must not create any Ingress resource.
 
-### `keys: {}` + `keySecret: livekit-api-keys`
+### `keys: {}` + `storeKeysInSecret: { enabled: true, existingSecret: "livekit-api-keys", keys: {} }`
 **Original:** `keys: devkey: <dev-api-secret>` — inline plaintext in the values file.  
 **Changed to:** Kubernetes Secret reference. Inline keys appear in:
 - `helm history` output
@@ -107,7 +107,7 @@ kubectl create secret generic livekit-api-keys \
 ```yaml
 livekit:
   keys: {}
-  keySecret: livekit-api-keys   # ← name of the Secret you just created
+  storeKeysInSecret: { enabled: true, existingSecret: "livekit-api-keys", keys: {} }   # ← name of the Secret you just created
 ```
 
 **Where your backend uses it:**
