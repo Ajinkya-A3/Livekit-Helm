@@ -65,16 +65,18 @@ livekit:
     # host = the AWS NLB hostname assigned to the stunner-gateway Service.
     # Retrieve with: kubectl get svc -n stunner
     turn_servers:
-      - host: <stunner-nlb-hostname>      # e.g. aabbcc.elb.us-east-1.amazonaws.com
+      - host: <stunner-nlb-hostname>      # e.g. aabbcc.elb.us-east-1.amazonaws.com or DNS
         port: 3478
-        protocol: udp                     # primary TURN relay — lowest latency
-        username: stunneradmin            # matches GatewayConfig.spec.userName
-        credential: stunner               # matches GatewayConfig.spec.password
+        protocol: udp               # TURN-UDP — no TLS, NLB is pure passthrough
+        secret: <your-hmac-secret>  # same value as stunner-auth-secret.secret
+        ttl: 86400                  # 24h — LiveKit derives username+credential per session
+
       - host: <stunner-nlb-hostname>      # same hostname, different port+protocol
         port: 5349
-        protocol: tls                     # fallback for clients blocking UDP + non-HTTPS TCP
-        username: stunneradmin
-        credential: stunner
+        protocol: tls               # TURN-TLS — STUNner holds the LE cert, not NLB
+        secret: <your-hmac-secret>  # same secret, same derivation
+        ttl: 86400
+
 
   redis:
     address: redis-master.redis.svc.cluster.local:6379
