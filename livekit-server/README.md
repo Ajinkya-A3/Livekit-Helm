@@ -121,45 +121,157 @@ const jwt = token.toJwt()
 
 ---
 
-### Secret 2: STUNner credentials (`username` / `credential` in turn_servers)
-
-**What it is:**
-The username and password that LiveKit pushes to WebRTC clients as TURN
-credentials. Clients send these to STUNner when requesting a relay allocation.
-Defined in your STUNner GatewayConfig.
-
-**These are not randomly generated** — you chose them when deploying STUNner.
-They must exactly match `GatewayConfig.spec.userName` and `GatewayConfig.spec.password`.
-
-**Your current values (from your GatewayConfig):**
-```
-username:   stunneradmin
-credential: stunner
-```
-
-⚠️ For production, replace both with strong random values:
+### Secret 2: STUNner Credentials (`secret` / `ttl` in turn_servers)
+ 
+## What it is
+ 
+A single shared HMAC-SHA1 key stored in `stunner-auth-secret` in the
+`stunner` namespace. LiveKit reads this key and derives unique, time-limited
+`username` + `credential` pairs per session on the fly. Clients receive
+those derived credentials — never the raw secret itself. STUNner
+independently performs the same derivation to validate each TURN allocation.
+ 
+**These are not static credentials you choose.**
+There is no `GatewayConfig.spec.userName` or `spec.password` anymore.
+The only thing that exists is one randomly generated HMAC key, shared
+between STUNner and LiveKit.
+ 
+---
+ 
+## Generate and Create
+ 
 ```bash
-STUNNER_USER=$(openssl rand -hex 8)
-STUNNER_PASS=$(openssl rand -hex 16)
-echo "STUNner user: $STUNNER_USER"
-echo "STUNner pass: $STUNNER_PASS"
+kubectl create secret generic stunner-auth-secret \
+  --namespace stunner \
+  --from-literal=type=ephemeral \
+  --from-literal=secret="$(openssl rand -hex 32)" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
-Then update your GatewayConfig and livekit values.yaml turn_servers to match.
-
-**Where it goes in values.yaml:**
+ 
+The Secret has exactly two keys:
+ 
+| Key      | Value                  | Purpose                                                              |
+|----------|------------------------|----------------------------------------------------------------------|
+| `type`   | `ephemeral`            | Literal string — tells STUNner operator which auth mode to activate  |
+| `secret` | `openssl rand -hex 32` | Your HMAC-SHA1 signing key (64 hex characters)                       |
+ 
+---
+ 
+## How It Flows to Clients
+ 
+LiveKit never sends the raw secret to clients. It derives per-session
+credentials from it and sends those instead.
+ 
+```
+stunner-auth-secret.secret = "abc123hmac..."
+         │
+         │  LiveKit reads this at deploy time via deploy.sh --set
+         ▼
+When user joins a room, LiveKit computes:
+ 
+  username   = "<unix_expiry_timestamp>:<user_id>"
+             = "1714086400:user-xyz"
+ 
+  credential = base64(HMAC-SHA1(secret, username))
+             = "EPddI2tMN9vtfGMhup1RYE5nSkA="
+ 
+Sent to WebRTC client in ICE config — derived values only, never raw secret:
+  {
+    urls:       "turns:turn.example.com:5349?transport=tcp",
+    username:   "1714086400:user-xyz",
+    credential: "EPddI2tMN9vtfGMhup1RYE5nSkA="
+  }
+ 
+STUNner receives TURN Allocate, independently computes:
+  expected = base64(HMAC-SHA1(secret, received_username))
+  if expected == received_credential AND timestamp > now → ALLOW
+  else → 401 Unauthorized
+```
+ 
+---
+ 
+## Where It Goes in values.yaml
+ 
 ```yaml
 turn_servers:
-  - host: <stunner-nlb-hostname>
+  - host: turn.example.com      # your DNS name — must match the TLS cert SAN
     port: 3478
     protocol: udp
-    username: stunneradmin       # ← GatewayConfig.spec.userName
-    credential: stunner          # ← GatewayConfig.spec.password
-  - host: <stunner-nlb-hostname>
+    secret: <your-hmac-secret>  # same value as stunner-auth-secret.secret
+    ttl: 86400                  # credential lifetime in seconds — 24h
+ 
+  - host: turn.example.com
     port: 5349
     protocol: tls
-    username: stunneradmin
-    credential: stunner
+    secret: <your-hmac-secret>  # same secret, same derivation
+    ttl: 86400
 ```
+ 
+Keep `<your-hmac-secret>` as a placeholder in values.yaml — safe to commit
+to git. The real value is injected at deploy time only (see below).
+ 
+---
+ 
+## How deploy.sh Reads It — No Hardcoding
+ 
+```bash
+# Read directly from the STUNner secret — one source of truth
+STUNNER_HMAC=$(kubectl get secret stunner-auth-secret -n stunner \
+  -o jsonpath='{.data.secret}' | base64 -d)
+ 
+helm upgrade --install livekit livekit/livekit-server \
+  --namespace livekit \
+  --values values-dev.yaml \
+  --set "livekit.rtc.turn_servers[0].host=turn.example.com" \
+  --set "livekit.rtc.turn_servers[0].port=3478" \
+  --set "livekit.rtc.turn_servers[0].protocol=udp" \
+  --set "livekit.rtc.turn_servers[0].secret=${STUNNER_HMAC}" \
+  --set "livekit.rtc.turn_servers[0].ttl=86400" \
+  --set "livekit.rtc.turn_servers[1].host=turn.example.com" \
+  --set "livekit.rtc.turn_servers[1].port=5349" \
+  --set "livekit.rtc.turn_servers[1].protocol=tls" \
+  --set "livekit.rtc.turn_servers[1].secret=${STUNNER_HMAC}" \
+  --set "livekit.rtc.turn_servers[1].ttl=86400"
+```
+ 
+One source of truth: `stunner-auth-secret` in the `stunner` namespace.
+No mirroring into the `livekit` namespace needed.
+ 
+---
+ 
+## Rotation
+ 
+```bash
+# 1. Rotate the HMAC secret in STUNner
+kubectl create secret generic stunner-auth-secret \
+  --namespace stunner \
+  --from-literal=type=ephemeral \
+  --from-literal=secret="$(openssl rand -hex 32)" \
+  --dry-run=client -o yaml | kubectl apply -f -
+ 
+# STUNner operator picks up the new Secret automatically — no restart.
+# Existing sessions with old credentials remain valid until their TTL
+# expires (up to 24h). STUNner accepts both old and new during the
+# overlap window — zero dropped sessions during rotation.
+ 
+# 2. Redeploy LiveKit so it derives new credentials with the rotated secret
+./deploy.sh
+```
+ 
+---
+ 
+## Comparison with Plaintext Auth
+ 
+| | Plaintext (old) | Ephemeral HMAC (current) |
+|---|---|---|
+| Config fields | `username` + `credential` | `secret` + `ttl` |
+| Sent to clients | Same static creds always | Unique per session |
+| Credential expiry | Never — valid forever | Automatic at TTL (24h max) |
+| If credential leaked | Valid until manual rotation | Expires within `ttl` seconds |
+| Rotation impact | Redeploy everything, drop sessions | Zero dropped sessions (overlap window) |
+| `values.yaml` fields | `username` / `credential` | `secret` / `ttl` |
+| GatewayConfig | `userName` + `password` inline | `authRef` → Secret only |
+| Secret in cluster | None (inline in GatewayConfig) | `stunner-auth-secret` (Opaque) |
 
 ---
 
