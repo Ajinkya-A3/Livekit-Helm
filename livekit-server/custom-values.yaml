@@ -1,0 +1,186 @@
+# values-dev.yaml — LiveKit Server on AWS EKS (Dev)
+#
+# Topology:
+#   - kgateway (Gateway API) terminates TLS and proxies WebSocket → livekit-server:7880
+#   - HTTP → HTTPS redirect handled at the kgateway Gateway level
+#   - UDP/TCP media ports (50000-60000, 7881) exposed directly via hostNetwork
+#   - STUN used by the server to auto-detect node public IP (use_external_ip: true)
+#   - STUNner deployed in-cluster as TURN fallback for clients behind strict NATs
+#
+# Prerequisites:
+#   - kgateway installed in the cluster with a Gateway resource created
+#   - An HTTPRoute created pointing to livekit-server:7880 (see README)
+#   - STUNner deployed (https://github.com/l7mp/stunner-helm)
+#     with plaintext auth (userName + password in GatewayConfig)
+#   - Redis deployed in-cluster on ondemand-arm64 node (or ElastiCache for prod)
+#   - livekit-api-keys Kubernetes Secret created (see README for generation command)
+#   - Node security group allows inbound: UDP 50000-60000, TCP 7881 from 0.0.0.0/0
+#
+# Usage:
+#   helm install livekit livekit/livekit-server \
+#     --namespace livekit --create-namespace \
+#     --values values-dev.yaml
+
+ 
+replicaCount: 1
+
+image:
+  repository: livekit/livekit-server
+  pullPolicy: IfNotPresent
+
+# 5h grace period — allows in-flight WebRTC sessions to drain before
+# the pod is killed during a rolling update or node eviction.
+terminationGracePeriodSeconds: 18000
+
+livekit:
+  port: 7880
+  log_level: info   # set to debug only when actively troubleshooting
+
+  rtc:
+    tcp_port: 7881
+    port_range_start: 50000
+    port_range_end: 60000
+
+    # Required on EKS: nodes have private IPs internally (e.g. 10.0.x.x).
+    # With this set to true, LiveKit calls a STUN server FROM THE NODE ITSELF
+    # to discover its real public IP, then advertises that IP as an ICE HOST
+    # candidate to clients. Without this, clients outside the VPC receive a
+    # private IP as the host candidate, fail to connect, and fall back to
+    # STUNner relay — adding 5-15s of connection delay for every session.
+    # STUNner only handles relay (last-resort) — it does NOT fix host candidates.
+    # See README §4 for the full explanation.
+    use_external_ip: true
+
+    # STUN servers sent to WebRTC CLIENTS so they can gather server-reflexive
+    # (SRFLX) candidates — i.e. discover their own public IP behind NAT.
+    # These are used by the client, not by the LiveKit server itself.
+    stun_servers:
+      - "stun:stun.l.google.com:19302"
+      - "stun:stun1.l.google.com:19302"
+      - "stun:stun.cloudflare.com:3478"
+
+    # TURN relay endpoints pushed to clients as ICE RELAY candidates.
+    # Used only when direct UDP and TCP paths both fail (strict corporate NAT).
+    # STUNner uses plaintext auth — username + credential, NOT hmac secret.
+    # host = the AWS NLB hostname assigned to the stunner-gateway Service.
+    # Retrieve with: kubectl get svc -n stunner
+    turn_servers:
+      - host: <stunner-nlb-hostname>      # e.g. aabbcc.elb.us-east-1.amazonaws.com
+        port: 3478
+        protocol: udp                     # primary TURN relay — lowest latency
+        username: stunneradmin            # matches GatewayConfig.spec.userName
+        credential: stunner               # matches GatewayConfig.spec.password
+      - host: <stunner-nlb-hostname>      # same hostname, different port+protocol
+        port: 5349
+        protocol: tls                     # fallback for clients blocking UDP + non-HTTPS TCP
+        username: stunneradmin
+        credential: stunner
+
+  redis:
+    address: redis-master.redis.svc.cluster.local:6379
+    # password: ""    # uncomment and set if Redis auth is enabled
+
+  # keys must be empty when using keySecret below.
+  # Do NOT inline API keys here — they will be visible in helm history,
+  # GitOps diffs, and pod environment dumps.
+  keys: {}
+
+  # The chart mounts this Secret and reads each entry as:
+  #   key name  → public API key ID  (your hex-16 value)
+  #   key value → JWT signing secret (your hex-32 value)
+  # Generate and create this secret with the command in README §2.
+  keySecret: livekit-api-keys
+
+  # Embedded TURN is disabled — STUNner handles TURN relay externally.
+  turn:
+    enabled: false
+
+# kgateway uses the Gateway API (HTTPRoute) — NOT a Kubernetes Ingress.
+# Setting type: none prevents the chart from creating an Ingress resource
+# that would conflict with or duplicate your HTTPRoute.
+# Create the HTTPRoute separately — see README §5.
+loadBalancer:
+  type: none
+
+# No embedded TURN LoadBalancer — STUNner's operator creates its own
+# LoadBalancer Service for the stunner-gateway.
+turnLoadbalancer:
+  enable: false
+
+# Required so pods bind the UDP/TCP media ports (50000-60000, 7881) directly
+# on the node's network interface and public IP.
+# Side effect: only ONE livekit-server pod can run per node — the podAntiAffinity
+# below enforces this when replicaCount > 1.
+# Service mesh sidecars (Istio/Linkerd) must be disabled because they cannot
+# intercept raw UDP or share the host network namespace.
+podHostNetwork: true
+
+podAnnotations:
+  sidecar.istio.io/inject: "false"
+  linkerd.io/inject: disabled
+
+podSecurityContext: {}
+securityContext: {}
+
+# Autoscaling disabled for dev — single replica is sufficient.
+# If you enable this later, each new replica needs its own dedicated node
+# (hostNetwork constraint), so ensure your ondemand-arm64 node pool has
+# enough capacity or raise the NodePool cpu/memory limits.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 60
+
+# Modest resources for dev. For production, benchmark under load and raise
+# limits — a busy room server can spike to 8+ CPU cores under heavy media load.
+resources:
+  limits:
+    cpu: 4000m
+    memory: 2048Mi
+  requests:
+    cpu: 2000m
+    memory: 1024Mi
+
+# ── Node & Pod Affinity ──────────────────────────────────────────────────────
+#
+# LiveKit is pinned HARD to ondemand-arm64 only:
+#   - Spot interruption mid-call = all participants dropped instantly
+#   - There is no graceful spot-interruption handler for WebRTC media
+#   - terminationGracePeriodSeconds only helps during controlled drains,
+#     not AWS spot reclaim (which gives only a 2-minute warning)
+#
+# The podAntiAffinity is requiredDuring (hard) because hostNetwork=true
+# means two LiveKit pods on the same node = port conflict = crash loop.
+# With replicaCount: 1 this is a no-op, but it's critical protection
+# if you ever scale to 2+ replicas.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-pool
+              operator: In
+              values: ["ondemand-arm64"]   # hard pin — no other pool ever
+
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname
+
+
+tolerations: []
+nodeSelector: {}
+deploymentStrategy: {}
+deploymentAnnotations: {}
+
+serviceAccount:
+  create: false
+  annotations: {}
+  name: ""
+
+
+
+nameOverride: ""
+# By default, the fullname of the resources will be based on the release name and chart name. You can override this with a custom name if needed.
+# needed for references to the service in the turn configuration, e.g. <fullname>.svc.cluster.local
+fullnameOverride: "livekit-server"  
