@@ -1,14 +1,14 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "testsip.fullname" . }}
+  name: {{ include "sip.fullname" . }}
   labels:
-    {{- include "testsip.labels" . | nindent 4 }}
+    {{- include "sip.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "testsip.selectorLabels" . | nindent 6 }}
+      {{- include "sip.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -17,9 +17,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "testsip.selectorLabels" . | nindent 8 }}
+        {{- include "sip.selectorLabels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "testsip.serviceAccountName" . }}
+      serviceAccountName: {{ include "sip.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- if .Values.podHostNetwork }}
@@ -49,7 +49,7 @@ spec:
             - name: SIP_CONFIG_BODY
               valueFrom:
                 configMapKeyRef:
-                  name: {{ include "testsip.fullname" . }}
+                  name: {{ include "sip.fullname" . }}
                   key: config.yaml
           ports:
             - name: sip-udp

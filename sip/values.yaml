@@ -1,6 +1,6 @@
-# test-sip — LiveKit SIP on EKS (hostNetwork, matches docker-compose / SIP README)
+# sip — LiveKit SIP on EKS (hostNetwork, matches docker-compose / SIP README)
 #
-# helm upgrade --install lk-sip ./test-sip -n livekit -f values.yaml
+# helm upgrade --install lk-sip ./sip -n livekit -f values.yaml
 #
 # Trunks and dispatch rules are created via LiveKit API / livekit-cli (not this chart).
 #

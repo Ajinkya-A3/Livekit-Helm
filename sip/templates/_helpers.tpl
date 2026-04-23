@@ -1,8 +1,8 @@
-{{- define "testsip.name" -}}
+{{- define "sip.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "testsip.fullname" -}}
+{{- define "sip.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -15,27 +15,27 @@
 {{- end }}
 {{- end }}
 
-{{- define "testsip.chart" -}}
+{{- define "sip.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "testsip.labels" -}}
-helm.sh/chart: {{ include "testsip.chart" . }}
-{{ include "testsip.selectorLabels" . }}
+{{- define "sip.labels" -}}
+helm.sh/chart: {{ include "sip.chart" . }}
+{{ include "sip.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
-{{- define "testsip.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "testsip.name" . }}
+{{- define "sip.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "sip.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
-{{- define "testsip.serviceAccountName" -}}
+{{- define "sip.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
-{{- default (include "testsip.fullname" .) .Values.serviceAccount.name }}
+{{- default (include "sip.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}

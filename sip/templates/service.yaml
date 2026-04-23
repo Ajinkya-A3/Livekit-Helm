@@ -2,9 +2,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "testsip.fullname" . }}
+  name: {{ include "sip.fullname" . }}
   labels:
-    {{- include "testsip.labels" . | nindent 4 }}
+    {{- include "sip.labels" . | nindent 4 }}
   {{- with .Values.service.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -25,5 +25,5 @@ spec:
       protocol: TCP
     {{- end }}
   selector:
-    {{- include "testsip.selectorLabels" . | nindent 4 }}
+    {{- include "sip.selectorLabels" . | nindent 4 }}
 {{- end }}

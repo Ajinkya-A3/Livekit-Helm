@@ -1,6 +1,6 @@
 -------------------------------------------------------------------------------
 
-LiveKit SIP (test-sip) has been deployed.
+LiveKit SIP has been deployed.
 
 SIP uses hostNetwork by default (large RTP port range). Ensure:
   - Security groups allow UDP/TCP {{ .Values.sip.sip_port }} and RTP range {{ .Values.sip.rtp_port }} to the node public IP.
