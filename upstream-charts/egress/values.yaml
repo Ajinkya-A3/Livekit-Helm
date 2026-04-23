@@ -1,6 +1,8 @@
 # Default values for egress.
-# This is a YAML-formatted file.
-# Declare variables to be passed into your templates.
+#
+# When livekitCredentials.secretName is set, api_key / api_secret are omitted from the ConfigMap and
+# supplied via LIVEKIT_API_KEY / LIVEKIT_API_SECRET (secretKeyRef). Put ws_url, redis, storage.s3, etc.
+# in egress — use IAM/IRSA for S3 (omit access_key / secret in YAML per Egress docs).
 
 replicaCount: 1
 
@@ -8,10 +10,25 @@ image:
   repository: livekit/egress
   pullPolicy: IfNotPresent
 
+# Kubernetes Secret → LIVEKIT_API_KEY / LIVEKIT_API_SECRET (omit api_key / api_secret from egress below).
+# Set secretName to "" to use legacy inline api_key / api_secret in egress (ConfigMap — not recommended).
+livekitCredentials:
+  secretName: livekit-egress-credentials
+  apiKey: api
+  apiSecretKey: api_secret
+
 egress:
+  ws_url: "ws://livekit-server.livekit.svc.cluster.local:7880"
+  redis:
+    address: redis-master.redis.svc.cluster.local:6379
   log_level: info
   health_port: 8080
   prometheus_port: 9090
+  enable_chrome_sandbox: true
+  storage:
+    s3:
+      region: us-east-1
+      bucket: your-bucket
 
 terminationGracePeriodSeconds: 3600
 
@@ -20,6 +37,9 @@ fullnameOverride: ""
 
 autoscaling:
   enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 60
 
 nodeSelector: {}
 

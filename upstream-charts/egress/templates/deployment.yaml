@@ -13,11 +13,11 @@ spec:
       {{- include "egress.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       labels:
         {{- include "egress.selectorLabels" . | nindent 8 }}
     spec:
@@ -32,6 +32,18 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            {{- if .Values.livekitCredentials.secretName }}
+            - name: LIVEKIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.livekitCredentials.secretName | quote }}
+                  key: {{ .Values.livekitCredentials.apiKey | quote }}
+            - name: LIVEKIT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.livekitCredentials.secretName | quote }}
+                  key: {{ .Values.livekitCredentials.apiSecretKey | quote }}
+            {{- end }}
             - name: EGRESS_CONFIG_BODY
               valueFrom:
                 configMapKeyRef:
