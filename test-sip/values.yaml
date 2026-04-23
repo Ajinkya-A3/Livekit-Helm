@@ -3,6 +3,12 @@
 # helm upgrade --install lk-sip ./test-sip -n livekit -f values.yaml
 #
 # Trunks and dispatch rules are created via LiveKit API / livekit-cli (not this chart).
+#
+# API key + secret are NOT stored in the ConfigMap. Create a Secret first, e.g.:
+#   kubectl create secret generic livekit-sip-credentials -n livekit \
+#     --from-literal=api='<your-api-key-id>' \
+#     --from-literal=api_secret='<your-signing-secret>'
+# The chart maps those keys to LIVEKIT_API_KEY / LIVEKIT_API_SECRET (see LiveKit SIP README).
 
 replicaCount: 1
 
@@ -11,9 +17,13 @@ image:
   pullPolicy: IfNotPresent
   tag: latest
 
+# Kubernetes Secret holding LiveKit credentials (same values as livekit-server API key + secret).
+livekitCredentials:
+  secretName: livekit-sip-credentials
+  apiKeySecretKey: api
+  apiSecretSecretKey: api_secret
+
 sip:
-  api_key: "REPLACE_WITH_LIVEKIT_API_KEY"
-  api_secret: "REPLACE_WITH_LIVEKIT_API_SECRET"
   ws_url: "ws://livekit-server.livekit.svc.cluster.local:7880"
   redis:
     address: redis-master.redis.svc.cluster.local:6379
