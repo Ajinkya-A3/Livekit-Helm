@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "testsip.fullname" . }}
+  labels:
+    {{- include "testsip.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "testsip.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "testsip.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "testsip.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.podHostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: sip
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: SIP_CONFIG_BODY
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "testsip.fullname" . }}
+                  key: config.yaml
+          ports:
+            - name: sip-udp
+              containerPort: {{ .Values.sip.sip_port }}
+              protocol: UDP
+            - name: sip-tcp
+              containerPort: {{ .Values.sip.sip_port }}
+              protocol: TCP
+            {{- if .Values.sip.health_port }}
+            - name: health
+              containerPort: {{ .Values.sip.health_port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.sip.prometheus_port }}
+            - name: metrics
+              containerPort: {{ .Values.sip.prometheus_port }}
+              protocol: TCP
+            {{- end }}
+          {{- if .Values.sip.health_port }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

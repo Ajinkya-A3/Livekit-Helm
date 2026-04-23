@@ -1,0 +1,10 @@
+apiVersion: v2
+name: test-egress
+description: LiveKit Egress (test chart) — recording/streaming for EKS + Karpenter
+type: application
+version: 0.1.0
+appVersion: "v1.9.0"
+
+sources:
+  - https://github.com/livekit/egress
+  - https://github.com/livekit/livekit-helm

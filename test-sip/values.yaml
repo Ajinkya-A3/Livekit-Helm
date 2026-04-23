@@ -1,0 +1,70 @@
+# test-sip — LiveKit SIP on EKS (hostNetwork, matches docker-compose / SIP README)
+#
+# helm upgrade --install lk-sip ./test-sip -n livekit -f values.yaml
+#
+# Trunks and dispatch rules are created via LiveKit API / livekit-cli (not this chart).
+
+replicaCount: 1
+
+image:
+  repository: livekit/sip
+  pullPolicy: IfNotPresent
+  tag: latest
+
+sip:
+  api_key: "REPLACE_WITH_LIVEKIT_API_KEY"
+  api_secret: "REPLACE_WITH_LIVEKIT_API_SECRET"
+  ws_url: "ws://livekit-server.livekit.svc.cluster.local:7880"
+  redis:
+    address: redis-master.redis.svc.cluster.local:6379
+  sip_port: 5060
+  rtp_port: 10000-20000
+  use_external_ip: true
+  health_port: 8080
+  prometheus_port: 9090
+  logging:
+    level: info
+
+podHostNetwork: true
+
+terminationGracePeriodSeconds: 3600
+
+service:
+  enabled: true
+  type: ClusterIP
+  annotations: {}
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: false
+  annotations: {}
+  name: ""
+
+podAnnotations:
+  sidecar.istio.io/inject: "false"
+  linkerd.io/inject: disabled
+
+podSecurityContext: {}
+
+securityContext: {}
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+# hostNetwork: only one SIP pod per node (SIP + RTP ports).
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-pool
+              operator: In
+              values: ["ondemand-arm64"]
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname

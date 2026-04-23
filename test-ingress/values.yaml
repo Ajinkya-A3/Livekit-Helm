@@ -1,0 +1,87 @@
+# test-ingress — LiveKit Ingress on EKS (aligns with livekit-server Karpenter pools in livekit-server/README.md)
+#
+# Install (local chart):
+#   helm upgrade --install lk-ingress ./test-ingress -n livekit -f values.yaml
+#
+# Match the same LiveKit API keys and Redis as livekit-server. ws_url should reach the server
+# WebSocket (internal cluster DNS is fine if ingress pods can resolve it):
+#   ws://livekit-server.livekit.svc.cluster.local:7880
+# Or wss:// via Gateway public hostname if the ingress process requires TLS — see LiveKit docs.
+
+replicaCount: 1
+
+image:
+  repository: livekit/ingress
+  pullPolicy: IfNotPresent
+  # tag: v1.4.3
+
+ingress:
+  api_key: "REPLACE_WITH_LIVEKIT_API_KEY"
+  api_secret: "REPLACE_WITH_LIVEKIT_API_SECRET"
+  ws_url: "ws://livekit-server.livekit.svc.cluster.local:7880"
+  logging:
+    level: info
+  health_port: 7888
+  prometheus_port: 7889
+  http_relay_port: 9090
+  rtmp_port: 1935
+  whip_port: 8080
+  rtc_config:
+    use_external_ip: true
+    udp_port: 7885
+  redis:
+    address: redis-master.redis.svc.cluster.local:6379
+  cpu_cost:
+    rtmp_cpu_cost: 2
+    whip_cpu_cost: 2
+    whip_bypass_transcoding_cpu_cost: 0.1
+  serviceType: LoadBalancer
+
+loadBalancer:
+  servicePort: 7888
+  annotations: {}
+  # Example (AWS NLB, internal):
+  # service.beta.kubernetes.io/aws-load-balancer-type: "external"
+  # service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+
+terminationGracePeriodSeconds: 3600
+
+nameOverride: ""
+fullnameOverride: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 60
+
+nodeSelector: {}
+
+resources: {}
+
+serviceAccount:
+  create: false
+  annotations: {}
+  name: ""
+
+podHostNetwork: true
+
+podAnnotations:
+  sidecar.istio.io/inject: "false"
+  linkerd.io/inject: disabled
+
+podSecurityContext: {}
+
+securityContext: {}
+
+tolerations: []
+
+# Same hard pin as livekit-server custom-values: hostNetwork + media — avoid Spot interruption.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-pool
+              operator: In
+              values: ["ondemand-arm64"]

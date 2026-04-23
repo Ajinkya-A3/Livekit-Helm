@@ -1,0 +1,29 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "testsip.fullname" . }}
+  labels:
+    {{- include "testsip.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    {{- if .Values.sip.health_port }}
+    - name: health
+      port: {{ .Values.sip.health_port }}
+      targetPort: health
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.sip.prometheus_port }}
+    - name: metrics
+      port: {{ .Values.sip.prometheus_port }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "testsip.selectorLabels" . | nindent 4 }}
+{{- end }}

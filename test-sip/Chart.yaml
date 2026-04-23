@@ -1,0 +1,9 @@
+apiVersion: v2
+name: test-sip
+description: LiveKit SIP bridge (test chart) — derived from livekit/sip docker-compose pattern
+type: application
+version: 0.1.0
+appVersion: "latest"
+
+sources:
+  - https://github.com/livekit/sip

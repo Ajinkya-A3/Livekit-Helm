@@ -1,0 +1,11 @@
+-------------------------------------------------------------------------------
+
+LiveKit SIP (test-sip) has been deployed.
+
+SIP uses hostNetwork by default (large RTP port range). Ensure:
+  - Security groups allow UDP/TCP {{ .Values.sip.sip_port }} and RTP range {{ .Values.sip.rtp_port }} to the node public IP.
+  - Node has a reachable public IP when use_external_ip is true (same idea as livekit-server).
+
+See: https://github.com/livekit/sip
+
+-------------------------------------------------------------------------------

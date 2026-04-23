@@ -1,0 +1,11 @@
+-------------------------------------------------------------------------------
+
+LiveKit Ingress (test-ingress) {{ .Values.image.tag | default .Chart.AppVersion }} has been deployed.
+
+If serviceType is LoadBalancer:
+  NOTE: It may take a few minutes for the LoadBalancer hostname/IP to be available.
+        Watch: kubectl get svc --namespace {{ .Release.Namespace }} -w {{ include "testingress.fullname" . }}
+
+  kubectl get svc --namespace {{ .Release.Namespace }} {{ include "testingress.fullname" . }}
+
+-------------------------------------------------------------------------------
