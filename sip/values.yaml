@@ -20,8 +20,8 @@ image:
 # Kubernetes Secret holding LiveKit credentials (same values as livekit-server API key + secret).
 livekitCredentials:
   secretName: livekit-sip-credentials
-  apiKeySecretKey: api
-  apiSecretSecretKey: api_secret
+  apiKey: api
+  apiSecretKey: api_secret
 
 sip:
   ws_url: "ws://livekit-server.livekit.svc.cluster.local:7880"

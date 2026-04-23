@@ -39,12 +39,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.livekitCredentials.secretName | quote }}
-                  key: {{ .Values.livekitCredentials.apiKeySecretKey | quote }}
+                  key: {{ .Values.livekitCredentials.apiKey | quote }}
             - name: LIVEKIT_API_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.livekitCredentials.secretName | quote }}
-                  key: {{ .Values.livekitCredentials.apiSecretSecretKey | quote }}
+                  key: {{ .Values.livekitCredentials.apiSecretKey | quote }}
             {{- end }}
             - name: SIP_CONFIG_BODY
               valueFrom:
