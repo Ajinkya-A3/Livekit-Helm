@@ -11,7 +11,7 @@
 #   - kgateway installed in the cluster with a Gateway resource created
 #   - An HTTPRoute created pointing to livekit-server:7880 (see README)
 #   - STUNner deployed (https://github.com/l7mp/stunner-helm)
-#     with plaintext auth (userName + password in GatewayConfig)
+#     with static auth (GatewayConfig userName + password — see stunner.yaml)
 #   - Redis deployed in-cluster on ondemand-arm64 node (or ElastiCache for prod)
 #   - livekit-api-keys Kubernetes Secret created (see README for generation command)
 #   - Node security group allows inbound: UDP 50000-60000, TCP 7881 from 0.0.0.0/0
@@ -61,21 +61,26 @@ livekit:
 
     # TURN relay endpoints pushed to clients as ICE RELAY candidates.
     # Used only when direct UDP and TCP paths both fail (strict corporate NAT).
-    # STUNner uses plaintext auth — username + credential, NOT hmac secret.
-    # host = the AWS NLB hostname assigned to the stunner-gateway Service.
-    # Retrieve with: kubectl get svc -n stunner
+    #
+    # LiveKit rtc.turn_servers shape (type TURNServer in pkg/config/config.go):
+    #   host, port, protocol, username, credential
+    #   https://github.com/livekit/livekit/blob/6eaa300949cdfe8fbf6e2ded926c9f8c1a01bc61/pkg/config/config.go#L113
+    #
+    # STUNner GatewayConfig uses authType: static with userName + password; those MUST
+    # match username + credential below so clients can authenticate TURN Allocate.
+    # host = NLB hostname or DNS for turn.example.com — kubectl get svc -n stunner
     turn_servers:
-      - host: <stunner-nlb-hostname>      # e.g. aabbcc.elb.us-east-1.amazonaws.com or DNS
+      - host: <stunner-nlb-hostname>      # e.g. aabbcc.elb.us-east-1.amazonaws.com or turn.example.com
         port: 3478
-        protocol: udp               # TURN-UDP — no TLS, NLB is pure passthrough
-        secret: <your-hmac-secret>  # same value as stunner-auth-secret.secret
-        ttl: 86400                  # 24h — LiveKit derives username+credential per session
+        protocol: udp
+        username: livekit-turn            # same as GatewayConfig userName in stunner.yaml
+        credential: <REPLACE_WITH_STRONG_PASSWORD>   # same as GatewayConfig password
 
-      - host: <stunner-nlb-hostname>      # same hostname, different port+protocol
+      - host: <stunner-nlb-hostname>
         port: 5349
-        protocol: tls               # TURN-TLS — STUNner holds the LE cert, not NLB
-        secret: <your-hmac-secret>  # same secret, same derivation
-        ttl: 86400
+        protocol: tls
+        username: livekit-turn
+        credential: <REPLACE_WITH_STRONG_PASSWORD>
 
 
   redis:
