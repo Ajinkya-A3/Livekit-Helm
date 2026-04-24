@@ -19,7 +19,7 @@
 # Usage:
 #   helm install livekit livekit/livekit-server \
 #     --namespace livekit --create-namespace \
-#     --values values-dev.yaml
+#     --values custom-values.yaml
 
  
 replicaCount: 1
@@ -87,19 +87,19 @@ livekit:
     address: redis-master.redis.svc.cluster.local:6379
     # password: ""    # uncomment and set if Redis auth is enabled
 
-  # keys must be empty when using keySecret below.
-  # Do NOT inline API keys here — they will be visible in helm history,
-  # GitOps diffs, and pod environment dumps.
+  # API keys: use key_file + storeKeysInSecret (see API_KEYS_SECRET.md).
+  # Secret must contain a data key named exactly `keys.yaml` whose value is the
+  # key file body, e.g. one line per pair: "<api_key_id>: <signing_secret>"
+  key_file: keys.yaml
+
+  # MUST stay empty — otherwise keys are duplicated into the ConfigMap.
   keys: {}
 
-  # The chart mounts this Secret and reads each entry as:
-  #   key name  → public API key ID  (your hex-16 value)
-  #   key value → JWT signing secret (your hex-32 value)
-  # Generate and create this secret with the command in README §2.
+  # Mounts Secret livekit-api-keys; pre-create the Secret (do not put keys here).
   storeKeysInSecret:
-    enabled: true                        # Must be true to use secret-based keys
-    existingSecret: "livekit-api-keys"   # Exact name of the secret you created
-    keys: {} 
+    enabled: true
+    existingSecret: "livekit-api-keys"
+    keys: {}
 
   # Embedded TURN is disabled — STUNner handles TURN relay externally.
   turn:

@@ -32,9 +32,9 @@ Components:
 an ALB Ingress on top of kgateway would duplicate routing and conflict with your
 HTTPRoute. The chart must not create any Ingress resource.
 
-### `keys: {}` + `storeKeysInSecret: { enabled: true, existingSecret: "livekit-api-keys", keys: {} }`
+### `key_file` + `keys: {}` + `storeKeysInSecret`
 **Original:** `keys: devkey: <dev-api-secret>` — inline plaintext in the values file.  
-**Changed to:** Kubernetes Secret reference. Inline keys appear in:
+**Changed to:** `key_file: keys.yaml` with a pre-created Secret whose data key **`keys.yaml`** holds the key file body (see [`API_KEYS_SECRET.md`](API_KEYS_SECRET.md)). Inline keys appear in:
 - `helm history` output
 - GitOps repository diffs (if you commit values)
 - `helm get values` which any cluster user can run
@@ -80,12 +80,15 @@ should be removed. AWS CCM assigns the NLB hostname automatically.
   sign access tokens that clients present when joining a room. Never expose this
   client-side or commit it to git.
 
-**How the chart uses it:**
-The chart mounts the Secret as a file. LiveKit reads each entry as
-`key_name=signing_secret`. The key name in the Secret (`${API_KEY}`) becomes
-the public API key ID; its value (`${API_SECRET}`) becomes the signing secret.
+**How the chart uses it (recommended):**
+With `livekit.key_file: keys.yaml` and `storeKeysInSecret.enabled`, the chart
+mounts a **single** Secret data key named **`keys.yaml`** whose contents are
+the LiveKit keys file (`<api_key_id>: <signing_secret>` per line). The server
+reads that file on startup — credentials are not inlined in the ConfigMap.
 
-**Generate and create:**
+Full walkthrough, verification commands, and pitfalls: **[`API_KEYS_SECRET.md`](API_KEYS_SECRET.md)**.
+
+**Generate and create (keys file in Secret):**
 ```bash
 API_KEY=$(openssl rand -hex 16)
 API_SECRET=$(openssl rand -hex 32)
@@ -93,19 +96,20 @@ API_SECRET=$(openssl rand -hex 32)
 echo "API Key    (public):  $API_KEY"
 echo "API Secret (signing): $API_SECRET"
 
-# Save both values somewhere safe (AWS Secrets Manager, Vault, .env file)
-# before running this — kubectl create does not let you read them back easily.
-
 kubectl create secret generic livekit-api-keys \
   --namespace livekit \
-  --from-literal="${API_KEY}=${API_SECRET}"
+  --from-literal=keys.yaml="${API_KEY}: ${API_SECRET}"
 ```
 
 **Where it goes in values.yaml:**
 ```yaml
 livekit:
+  key_file: keys.yaml
   keys: {}
-  storeKeysInSecret: { enabled: true, existingSecret: "livekit-api-keys", keys: {} }   # ← name of the Secret you just created
+  storeKeysInSecret:
+    enabled: true
+    existingSecret: "livekit-api-keys"
+    keys: {}
 ```
 
 **Where your backend uses it:**
@@ -418,13 +422,13 @@ kubectl apply -f httproute-livekit.yaml
 # 1. Create namespace
 kubectl create namespace livekit
 
-# 2. Generate and create API key secret
+# 2. Generate and create API key secret (keys file — see API_KEYS_SECRET.md)
 API_KEY=$(openssl rand -hex 16)
 API_SECRET=$(openssl rand -hex 32)
 echo "Save these: KEY=$API_KEY  SECRET=$API_SECRET"
 kubectl create secret generic livekit-api-keys \
   --namespace livekit \
-  --from-literal="${API_KEY}=${API_SECRET}"
+  --from-literal=keys.yaml="${API_KEY}: ${API_SECRET}"
 
 # 3. Deploy Redis (in redis namespace, ondemand-arm64 node)
 helm install redis bitnami/redis \
@@ -435,10 +439,10 @@ helm install redis bitnami/redis \
 kubectl get svc -n stunner
 # Fill in <stunner-nlb-hostname> in values-dev.yaml
 
-# 5. Deploy LiveKit
+# 5. Deploy LiveKit (use custom-values.yaml or your own file with key_file + storeKeysInSecret)
 helm install livekit livekit/livekit-server \
   --namespace livekit \
-  --values values-dev.yaml
+  --values custom-values.yaml
 
 # 6. Apply HTTPRoute for kgateway
 kubectl apply -f httproute-livekit.yaml
