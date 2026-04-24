@@ -106,64 +106,39 @@ creating a TXT record in Cloudflare instead — no port dependency at all.
 
 ---
 
-## LiveKit `rtc.turn_servers` and STUNner auth
+## Ephemeral Auth Flow (HMAC-SHA1)
 
-LiveKit’s YAML config uses a **`TURNServer`** struct for each relay entry
-([`pkg/config/config.go`](https://github.com/livekit/livekit/blob/6eaa300949cdfe8fbf6e2ded926c9f8c1a01bc61/pkg/config/config.go#L113)):
-
-```go
-type TURNServer struct {
-	Host       string `yaml:"host"`
-	Port       int    `yaml:"port"`
-	Protocol   string `yaml:"protocol"`
-	Username   string `yaml:"username,omitempty"`
-	Credential string `yaml:"credential,omitempty"`
-}
-```
-
-So each `turn_servers` list item is **`host`**, **`port`**, **`protocol`**, plus
-optional **`username`** and **`credential`** — the pair WebRTC clients receive
-in their ICE server configuration.
-
-This repo pairs that with STUNner **`GatewayConfig`** **static** authentication
-(`authType: static`, **`userName`**, **`password`**) in `stunner.yaml`.
-Field correspondence:
-
-| LiveKit (`turn_servers`) | STUNner (`GatewayConfig`) |
-|--------------------------|---------------------------|
-| `username`               | `userName`                |
-| `credential`             | `password`                |
-
-Use one strong shared password, set identically in both places. Newer LiveKit
-releases may also support additional fields (for example ephemeral `secret` /
-`ttl`); this documentation follows the struct above and static STUNner auth.
-
----
-
-## Static credential flow (before traffic paths)
-
-Clients must receive TURN **`username`** and **`credential`** that STUNner will
-accept for `Allocate`.
+Before either traffic path can work, clients need time-limited credentials.
 
 ```
-stunner.yaml — GatewayConfig
-  authType: static
-  userName: livekit-turn
-  password: <shared-secret>
+stunner-auth-secret (stunner namespace)
+  type: ephemeral
+  secret: abc123hmac...
        │
-       │  STUNner validates Allocate using long-term credential mechanism
+       │ authRef
        ▼
-livekit-server values — livekit.rtc.turn_servers[]
-  username: livekit-turn
-  credential: <same shared-secret>
+STUNner GatewayConfig         LiveKit (same HMAC secret via deploy.sh)
+  operator reads secret key         │
+       │                            │ When user joins room:
+       │                            ▼
+       │                   LiveKit computes per-session creds:
+       │                     username   = "<unix_expiry>:<user_id>"
+       │                     credential = base64(HMAC-SHA1(secret, username))
+       │                   Sends to client in WebSocket ICE config
        │
-       │  LiveKit includes these in ICE config sent to the browser/client
+       │ When client sends TURN Allocate:
        ▼
-WebRTC client — TURN Allocate uses the same username + credential
+STUNner validates:
+  1. Parse username → expiry timestamp + user_id
+  2. Compute: expected = base64(HMAC-SHA1(secret, username))
+  3. Compare expected == received credential
+  4. Check: expiry timestamp > now
+  5. ALLOW relay allocation   OR   REJECT with 401
 ```
 
-Rotate by changing **`password`** in `GatewayConfig` and **`credential`** in
-LiveKit values together, then redeploy both.
+Every client gets unique, time-limited credentials. The raw HMAC secret
+never leaves your backend. Credentials expire automatically after TTL
+(default 86400s / 24h) — no manual rotation needed.
 
 ---
 
@@ -179,8 +154,8 @@ WebRTC Client
 │  LiveKit sends ICE server config:
 │  {
 │    urls:       ["turn:turn.example.com:3478?transport=udp"],
-│    username:   "livekit-turn",            ← matches GatewayConfig userName
-│    credential: "<shared-password>"       ← matches GatewayConfig password
+│    username:   "1714086400:user-xyz",     ← expiry:userid
+│    credential: "EPddI2tMN9..."            ← HMAC-SHA1 derived
 │  }
 │
 │  Step 2 — TURN Allocate Request (UDP)
@@ -197,7 +172,7 @@ AWS NLB — port 3478 UDP
 STUNner pod — TURN-UDP listener (port 3478)
 │
 │  1. Receives TURN Allocate request
-│  2. Validates static username + credential (STUN long-term credential)
+│  2. Validates ephemeral credentials (HMAC-SHA1 check + expiry check)
 │  3. On success: creates UDP relay allocation
 │     Relay address: a port on STUNner's internal IP, e.g. 10.0.1.45:56789
 │  4. Client sends media to relay address
@@ -241,8 +216,8 @@ WebRTC Client
 │  {
 │    urls:       ["turns:turn.example.com:5349?transport=tcp"],
 │                  ↑ "turns" = TURN over TLS (not "turn")
-│    username:   "livekit-turn",
-│    credential: "<shared-password>"
+│    username:   "1714086400:user-xyz",
+│    credential: "EPddI2tMN9..."
 │  }
 │
 │  Step 2 — TCP connection to turn.example.com:5349
@@ -267,7 +242,7 @@ STUNner pod — TURN-TLS listener (port 5349)
 │
 │  After TLS handshake, STUNner receives the TURN Allocate request
 │  inside the decrypted TCP stream:
-│    1. Validates static credentials (identical to UDP path)
+│    1. Validates ephemeral credentials (identical to UDP path)
 │    2. Creates TCP relay allocation
 │    3. Relays media datagrams inside the TCP tunnel to livekit-server
 │
@@ -445,8 +420,12 @@ helm repo update
 helm install stunner-gateway-operator stunner/stunner-gateway-operator \
   --namespace stunner-system --create-namespace
 
-# 5. Edit stunner.yaml — set GatewayConfig userName + password (and TLS/email).
-#    Use the same username + password under livekit.rtc.turn_servers in LiveKit values.
+# 5. Create HMAC auth secret
+kubectl create secret generic stunner-auth-secret \
+  --namespace stunner \
+  --from-literal=type=ephemeral \
+  --from-literal=secret="$(openssl rand -hex 32)" \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 # 6. Apply stunner.yaml (ClusterIssuer + Certificate + everything else)
 kubectl apply -f stunner.yaml
@@ -516,12 +495,13 @@ openssl s_client -connect turn.example.com:5349 -servername turn.example.com
 
 **401 Unauthorized from STUNner:**
 ```bash
-# Verify static TURN username/password match between STUNner and LiveKit
-kubectl get gatewayconfig stunner-gatewayconfig -n stunner -o yaml
-# spec.userName / spec.password must match livekit.rtc.turn_servers username / credential
+# Verify HMAC secret matches what LiveKit uses
+kubectl get secret stunner-auth-secret -n stunner \
+  -o jsonpath='{.data.secret}' | base64 -d
 
-helm get values livekit -n livekit
-# turn_servers entries must use the same pair
+# Compare against LiveKit helm values
+helm get values livekit -n livekit | grep secret
+# Both must be identical
 ```
 
 **Relay reaches STUNner but not LiveKit:**

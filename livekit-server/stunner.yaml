@@ -71,16 +71,30 @@ spec:
 
 ---
 # ─────────────────────────────────────────────────────────────────────────────
-# GatewayConfig — static TURN credentials (STUNner authType: static)
+# Auth Secret — ephemeral HMAC-SHA1 auth
+# type: ephemeral  → selects time-windowed HMAC auth mode
+# secret           → shared HMAC-SHA1 key, same value LiveKit uses
 #
-# LiveKit’s rtc.turn_servers entries must use the same username + credential
-# the server pushes to clients. In LiveKit’s config struct those YAML keys are
-# username + credential (see pkg/config/config.go, type TURNServer):
-#   https://github.com/livekit/livekit/blob/6eaa300949cdfe8fbf6e2ded926c9f8c1a01bc61/pkg/config/config.go#L113
-#
-# STUNner field mapping: userName ↔ LiveKit username, password ↔ LiveKit credential.
-# Replace placeholders and mirror the same values in livekit-server custom-values.yaml
-# under livekit.rtc.turn_servers (do not commit real passwords).
+# Create:
+#   kubectl create secret generic stunner-auth-secret \
+#     --namespace stunner \
+#     --from-literal=type=ephemeral \
+#     --from-literal=secret="$(openssl rand -hex 32)" \
+#     --dry-run=client -o yaml | kubectl apply -f -
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: stunner-auth-secret
+  namespace: stunner
+type: Opaque
+stringData:
+  type: ephemeral
+  secret: <your-hmac-secret>              # openssl rand -hex 32
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# GatewayConfig
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: stunner.l7mp.io/v1
 kind: GatewayConfig
@@ -90,9 +104,9 @@ metadata:
 spec:
   logLevel: "all:DEBUG,turn:INFO"
   realm: stunner.l7mp.io
-  authType: static
-  userName: livekit-turn
-  password: <REPLACE_WITH_STRONG_PASSWORD>
+  authRef:
+    name: stunner-auth-secret
+    namespace: stunner
 
 ---
 # ─────────────────────────────────────────────────────────────────────────────
