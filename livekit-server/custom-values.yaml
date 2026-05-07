@@ -1,123 +1,252 @@
 # values-dev.yaml — LiveKit Server on AWS EKS (Dev)
 #
 # Topology:
-#   - kgateway (Gateway API) terminates TLS and proxies WebSocket → livekit-server:7880
-#   - HTTP → HTTPS redirect handled at the kgateway Gateway level
+#   - AWS ALB (Ingress) terminates TLS via ACM cert and proxies HTTP/WebSocket
+#     → livekit-server ClusterIP Service :80 → pod :7880
+#   - HTTP → HTTPS redirect handled at ALB level (ssl-redirect: 443)
+#   - ALB session stickiness enabled (86400s) — required for WebSocket connections
+#     so a client always reconnects to the same pod during reconnects
 #   - UDP/TCP media ports (50000-60000, 7881) exposed directly via hostNetwork
-#   - STUN used by the server to auto-detect node public IP (use_external_ip: true)
-#   - STUNner deployed in-cluster as TURN fallback for clients behind strict NATs
+#     NLBs are NOT used for media — hostPort binds directly on the node
+#   - use_external_ip: true — LiveKit calls STUN from the node to discover
+#     its public IP and advertises it as an ICE HOST candidate to clients
+#   - Integrated Pion TURN (built into LiveKit binary) handles relay for
+#     clients behind strict NATs — no external TURN pod/process needed
+#     Two separate NLBs expose TURN ports (mixed protocol workaround):
+#       NLB #1 (TCP)  :443  → node:5349  (TURN/TLS  — Pion terminates TLS)
+#       NLB #2 (UDP)  :3478 → node:3478  (TURN/UDP  — plaintext relay)
+#     DNS: turn.example.online → both NLB hostnames (Cloudflare, proxy OFF)
 #
-# Prerequisites:
-#   - kgateway installed in the cluster with a Gateway resource created
-#   - An HTTPRoute created pointing to livekit-server:7880 (see README)
-#   - STUNner deployed (https://github.com/l7mp/stunner-helm)
-#     with plaintext auth (userName + password in GatewayConfig)
-#   - Redis deployed in-cluster on ondemand-arm64 node (or ElastiCache for prod)
-#   - livekit-api-keys Kubernetes Secret created (see README for generation command)
-#   - Node security group allows inbound: UDP 50000-60000, TCP 7881 from 0.0.0.0/0
+# What is NOT used here (and why):
+#   - kgateway / Gateway API — using standard Kubernetes Ingress with AWS LBC instead
+#   - STUNner — replaced by integrated Pion TURN (simpler, no extra pods)
+#   - turnLoadbalancer (helm-managed) — disabled; we create NLB Services manually
+#     so we can split TCP and UDP into separate LoadBalancer Services (k8s limitation:
+#     a single Service cannot mix TCP and UDP protocols with type: LoadBalancer on EKS)
+#
+# External resources that must exist before helm install/upgrade:
+#   1. Kubernetes TLS Secret for TURN cert (created by cert-manager — see below)
+#        Secret name: turn-tls-secret  in namespace: livekit
+#        cert-manager Certificate resource targets turn.example.online
+#   2. Kubernetes Secret for LiveKit API keys
+#        Secret name: livekit-api-keys  in namespace: livekit
+#        Format: keys.yaml key containing "<apiKeyId>: <signingSecret>" lines
+#   3. Two NLB Services applied manually (turn-tcp-nlb.yaml, turn-udp-nlb.yaml)
+#        See companion manifests — apply AFTER helm upgrade so pod labels exist
+#   4. Cloudflare DNS records (proxy MUST be OFF — grey cloud):
+#        CNAME turn.example.online → <tcp-nlb-hostname>
+#        CNAME turn.example.online → <udp-nlb-hostname>
+#   5. Node Security Group inbound rules:
+#        TCP 5349        from 0.0.0.0/0   (TURN/TLS)
+#        UDP 3478        from 0.0.0.0/0   (TURN/UDP)
+#        TCP 7881        from 0.0.0.0/0   (WebRTC TCP fallback)
+#        UDP 50000-60000 from 0.0.0.0/0   (WebRTC media)
+#
+# Cert-manager Certificate resource for TURN TLS (apply separately):
+#
+#   apiVersion: cert-manager.io/v1
+#   kind: Certificate
+#   metadata:
+#     name: turn-tls
+#     namespace: livekit
+#   spec:
+#     secretName: turn-tls-secret        # helm values.livekit.turn.secretName must match
+#     dnsNames:
+#       - turn.example.online
+#     issuerRef:
+#       name: letsencrypt-prod           # your existing ClusterIssuer name
+#       kind: ClusterIssuer
 #
 # Usage:
-#   helm install livekit livekit/livekit-server \
+#   helm upgrade --install livekit livekit/livekit-server \
 #     --namespace livekit --create-namespace \
-#     --values custom-values.yaml
+#     --values values-dev.yaml
 
- 
+# ── Replica count ─────────────────────────────────────────────────────────────
+# Keep at 1 for dev. If you scale up, each replica needs its own node
+# (hostNetwork: true causes port conflicts if two pods land on the same node).
+# The podAntiAffinity below enforces this automatically.
 replicaCount: 1
 
 image:
   repository: livekit/livekit-server
+  tag: "v1.11"
   pullPolicy: IfNotPresent
+  # tag defaults to chart appVersion — pin explicitly for production
 
-# 5h grace period — allows in-flight WebRTC sessions to drain before
-# the pod is killed during a rolling update or node eviction.
+# 5h grace period — allows in-flight WebRTC sessions to complete before
+# the pod is terminated during a rolling update or node eviction.
+# AWS spot interruption gives only 2min warning — see nodeAffinity comment below.
 terminationGracePeriodSeconds: 18000
 
 livekit:
+  # LiveKit HTTP/WebSocket signaling port inside the pod.
+  # ALB targets this via the ClusterIP Service on port 80.
   port: 7880
-  log_level: info   # set to debug only when actively troubleshooting
+  log_level: info   # change to debug only when actively troubleshooting
 
   rtc:
+    # WebRTC TCP fallback port — used when UDP is blocked on the client side.
+    # Exposed via hostPort directly on the node (hostNetwork: true).
+    # Node SG must allow TCP 7881 inbound.
     tcp_port: 7881
+
+    # UDP media port range for WebRTC.
+    # Each participant pair uses one UDP port from this range.
+    # Exposed via hostPort range on the node. Node SG must allow UDP 50000-60000 inbound.
     port_range_start: 50000
     port_range_end: 60000
 
-    # Required on EKS: nodes have private IPs internally (e.g. 10.0.x.x).
-    # With this set to true, LiveKit calls a STUN server FROM THE NODE ITSELF
-    # to discover its real public IP, then advertises that IP as an ICE HOST
-    # candidate to clients. Without this, clients outside the VPC receive a
-    # private IP as the host candidate, fail to connect, and fall back to
-    # STUNner relay — adding 5-15s of connection delay for every session.
-    # STUNner only handles relay (last-resort) — it does NOT fix host candidates.
-    # See README §4 for the full explanation.
+    # Required on EKS: EKS nodes have private IPs (e.g. 10.0.x.x) internally.
+    # With this true, LiveKit calls a STUN server FROM THE NODE at startup
+    # to discover its real public IP, then advertises that as an ICE HOST
+    # candidate. Without this, clients outside the VPC receive a private IP,
+    # fail direct connection, and wait for TURN relay — adding 5-15s delay.
     use_external_ip: true
 
-    # STUN servers sent to WebRTC CLIENTS so they can gather server-reflexive
-    # (SRFLX) candidates — i.e. discover their own public IP behind NAT.
-    # These are used by the client, not by the LiveKit server itself.
+    # STUN servers used by WebRTC CLIENTS to discover their own public IP
+    # (server-reflexive / SRFLX candidates). Not used by the LiveKit server itself.
     stun_servers:
-      - "stun:stun.l.google.com:19302"
-      - "stun:stun1.l.google.com:19302"
-      - "stun:stun.cloudflare.com:3478"
+      - "stun.l.google.com:19302"
+      - "stun1.l.google.com:19302"
+      - "stun.cloudflare.com:3478"
 
-    # TURN relay endpoints pushed to clients as ICE RELAY candidates.
-    # Used only when direct UDP and TCP paths both fail (strict corporate NAT).
-    # STUNner uses plaintext auth — username + credential, NOT hmac secret.
-    # host = the AWS NLB hostname assigned to the stunner-gateway Service.
-    # Retrieve with: kubectl get svc -n stunner
-    turn_servers:
-      - host: <stunner-nlb-hostname>      # e.g. aabbcc.elb.us-east-1.amazonaws.com or DNS
-        port: 3478
-        protocol: udp               # TURN-UDP — no TLS, NLB is pure passthrough
-        secret: <your-hmac-secret>  # same value as stunner-auth-secret.secret
-        ttl: 86400                  # 24h — LiveKit derives username+credential per session
-
-      - host: <stunner-nlb-hostname>      # same hostname, different port+protocol
-        port: 5349
-        protocol: tls               # TURN-TLS — STUNner holds the LE cert, not NLB
-        secret: <your-hmac-secret>  # same secret, same derivation
-        ttl: 86400
-
+    # ── Integrated Pion TURN — no turn_servers block needed ──────────────────
+    #
+    # When livekit.turn.enabled is true (below), LiveKit automatically:
+    #   1. Generates short-lived HMAC credentials per session internally
+    #   2. Pushes TURN URLs to clients during ICE negotiation:
+    #        turns:turn.example.online:443   (TURN/TLS)
+    #        turn:turn.example.online:3478   (TURN/UDP)
+    #   3. Validates those credentials itself when clients connect to Pion TURN
+    #
+    # There is NO need for a manual turn_servers block — LiveKit handles
+    # credential generation and advertisement automatically.
+    #
+    # ── STUNner (REMOVED — kept here for reference if you want to revert) ────
+    #
+    # STUNner was a separate in-cluster TURN proxy (l7mp/stunner-helm).
+    # It required plaintext static credentials and its own NLB.
+    # Replaced by integrated Pion TURN which has:
+    #   - No extra pods or helm releases to manage
+    #   - Stronger security (per-session HMAC vs static username/password)
+    #   - No credential sync needed between LiveKit and a separate TURN process
+    #
+    # To revert to STUNner: set turn.enabled: false below and uncomment:
+    # turn_servers:
+    #   - host: <stunner-nlb-hostname>
+    #     port: 3478
+    #     protocol: udp
+    #     secret: <your-hmac-secret>
+    #     ttl: 86400
+    #   - host: <stunner-nlb-hostname>
+    #     port: 5349
+    #     protocol: tls
+    #     secret: <your-hmac-secret>
+    #     ttl: 86400
 
   redis:
-    address: redis-master.redis.svc.cluster.local:6379
-    # password: ""    # uncomment and set if Redis auth is enabled
+    # In-cluster Redis. Switch to ElastiCache endpoint for production.
+    address: redis.livekit.svc.cluster.local:6379
+    # password: ""    # uncomment if Redis auth is enabled
 
-  # API keys: use key_file + storeKeysInSecret (see API_KEYS_SECRET.md).
-  # Secret must contain a data key named exactly `keys.yaml` whose value is the
-  # key file body, e.g. one line per pair: "<api_key_id>: <signing_secret>"
+  # API key file path inside the pod.
+  # The storeKeysInSecret block below mounts the Secret at this path.
   key_file: keys.yaml
 
-  # MUST stay empty — otherwise keys are duplicated into the ConfigMap.
+  # Must be empty when storeKeysInSecret is used — avoids duplicating
+  # keys into the ConfigMap in plaintext.
   keys: {}
 
-  # Mounts Secret livekit-api-keys; pre-create the Secret (do not put keys here).
+  # Mounts the livekit-api-keys Secret as a file at key_file path.
+  # Pre-create the Secret before helm install:
+  #   kubectl create secret generic livekit-api-keys \
+  #     --from-literal=keys.yaml="<apiKeyId>: <signingSecret>" \
+  #     -n livekit
   storeKeysInSecret:
     enabled: true
     existingSecret: "livekit-api-keys"
     keys: {}
 
-  # Embedded TURN is disabled — STUNner handles TURN relay externally.
+  # ── Integrated Pion TURN ───────────────────────────────────────────────────
+  #
+  # Pion TURN is compiled into the LiveKit binary — no separate process.
+  # When enabled, the deployment template automatically:
+  #   - Mounts the TLS Secret (secretName) at /etc/lkcert/ inside the pod
+  #   - Sets LIVEKIT_TURN_CERT=/etc/lkcert/tls.crt env var
+  #   - Sets LIVEKIT_TURN_KEY=/etc/lkcert/tls.key env var
+  #   - Opens hostPort for tls_port (TCP) and udp_port (UDP) on the node
+  #
+  # domain:
+  #   Hostname advertised to clients in TURN URLs. Must exactly match the
+  #   CN/SAN in your TLS cert (turn-tls-secret). Clients connect to this.
+  #
+  # tls_port:
+  #   TCP port Pion TURN listens on INSIDE the pod for TURN over TLS.
+  #   hostPort binds this on the node (because podHostNetwork: true).
+  #   TCP NLB forwards external :443 → node:5349.
+  #   We use 5349 internally so it doesn't conflict with kgateway/ALB on 443.
+  #   Clients receive: turns:turn.example.online:443 (the NLB external port)
+  #
+  # udp_port:
+  #   UDP port Pion TURN listens on for plain TURN/UDP.
+  #   hostPort binds this on the node.
+  #   UDP NLB forwards :3478 → node:3478 (same port, no remapping).
+  #   Clients receive: turn:turn.example.online:3478
+  #
+  :
+  #   Name of the Kubernetes TLS Secret in the livekit namespace.
+  #   Created by cert-manager (Certificate resource defined in header above).
+  #   Must exist before helm upgrade — pod will fail to start without it
+  #   because the template has: required "tls secret required if turn enabled"
+  #
+  # external_tls (commented out = false):
+  #   false → Pion terminates TLS itself using the mounted cert.
+  #           NLB is pure TCP passthrough — correct for our setup.
+  #   true  → LiveKit expects plain TCP; an upstream proxy already stripped TLS.
+  #           Do NOT set true here — our NLBs do not terminate TLS.
+  # ──────────────────────────────────────────────────────────────────────────
   turn:
-    enabled: false
+    enabled: true
+    domain: turn.example.online
+    tls_port: 5349
+    udp_port: 3478
+    secretName: turn-tls-secret
+    # external_tls: true    ← leave commented — NLB is TCP passthrough, Pion handles TLS
 
-# kgateway uses the Gateway API (HTTPRoute) — NOT a Kubernetes Ingress.
-# Setting type: none prevents the chart from creating an Ingress resource
-# that would conflict with or duplicate your HTTPRoute.
-# Create the HTTPRoute separately — see README §5.
+# ── ALB Ingress (managed outside helm) ───────────────────────────────────────
+# The ALB Ingress resource is created and managed separately (ingress.yaml).
+# It handles: livekit.example.online → livekit-server ClusterIP :80
+# TLS is terminated at the ALB using the ACM certificate — not inside the pod.
+# Setting loadBalancer.type: none prevents the helm chart from creating its
+# own Ingress or LoadBalancer Service that would conflict with the ALB.
+#
+# ALB annotations in use (reference):
+#   backend-protocol: HTTP          — ALB → pod is plain HTTP (TLS already stripped)
+#   certificate-arn: <acm-arn>     — ACM cert for livekit.example.online
+#   listen-ports: HTTP:80, HTTPS:443
+#   ssl-redirect: 443              — HTTP automatically redirected to HTTPS
+#   idle_timeout: 3600s            — must be longer than longest WebSocket session
+#   stickiness: 86400s             — WebSocket reconnects must hit the same pod
+#   target-type: ip                — routes directly to pod IP (not node)
 loadBalancer:
-  type: none
+  type: disable
 
-# No embedded TURN LoadBalancer — STUNner's operator creates its own
-# LoadBalancer Service for the stunner-gateway.
+# Helm chart's built-in TURN LoadBalancer Service is disabled.
+# We create two separate NLB Services manually (turn-tcp-nlb.yaml, turn-udp-nlb.yaml)
+# because Kubernetes does not support mixed TCP+UDP protocols on a single
+# LoadBalancer Service — EKS/NLB enforces this strictly.
 turnLoadbalancer:
   enable: false
 
-# Required so pods bind the UDP/TCP media ports (50000-60000, 7881) directly
-# on the node's network interface and public IP.
-# Side effect: only ONE livekit-server pod can run per node — the podAntiAffinity
-# below enforces this when replicaCount > 1.
-# Service mesh sidecars (Istio/Linkerd) must be disabled because they cannot
-# intercept raw UDP or share the host network namespace.
+# ── Host Network ──────────────────────────────────────────────────────────────
+# Binds UDP/TCP media ports and TURN ports directly on the node's network
+# interface and public IP — bypassing kube-proxy and ClusterIP routing.
+# Required because:
+#   1. UDP port ranges (50000-60000) cannot be efficiently proxied by kube-proxy
+#   2. TURN hostPorts need to be reachable directly by NLBs in instance mode
+# Side effect: only ONE LiveKit pod per node — podAntiAffinity enforces this.
+# Istio/Linkerd sidecars must be disabled (cannot share host network namespace).
 podHostNetwork: true
 
 podAnnotations:
@@ -127,18 +256,12 @@ podAnnotations:
 podSecurityContext: {}
 securityContext: {}
 
-# Autoscaling disabled for dev — single replica is sufficient.
-# If you enable this later, each new replica needs its own dedicated node
-# (hostNetwork constraint), so ensure your ondemand-arm64 node pool has
-# enough capacity or raise the NodePool cpu/memory limits.
 autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 60
 
-# Modest resources for dev. For production, benchmark under load and raise
-# limits — a busy room server can spike to 8+ CPU cores under heavy media load.
 resources:
   limits:
     cpu: 4000m
@@ -147,18 +270,18 @@ resources:
     cpu: 2000m
     memory: 1024Mi
 
-# ── Node & Pod Affinity ──────────────────────────────────────────────────────
+# ── Node & Pod Affinity ───────────────────────────────────────────────────────
 #
-# LiveKit is pinned HARD to ondemand-arm64 only:
-#   - Spot interruption mid-call = all participants dropped instantly
-#   - There is no graceful spot-interruption handler for WebRTC media
-#   - terminationGracePeriodSeconds only helps during controlled drains,
-#     not AWS spot reclaim (which gives only a 2-minute warning)
+# nodeAffinity (hard):
+#   Pins LiveKit to the ondemand-arm64 node pool only.
+#   Spot nodes are NOT safe for WebRTC — a spot interruption drops all active
+#   calls immediately with no graceful handoff. terminationGracePeriodSeconds
+#   only applies to controlled drains, not spot reclaim (2min warning only).
 #
-# The podAntiAffinity is requiredDuring (hard) because hostNetwork=true
-# means two LiveKit pods on the same node = port conflict = crash loop.
-# With replicaCount: 1 this is a no-op, but it's critical protection
-# if you ever scale to 2+ replicas.
+# podAntiAffinity (hard):
+#   Prevents two LiveKit pods from landing on the same node.
+#   hostNetwork: true means two pods on one node = port conflict = crash loop.
+#   With replicaCount: 1 this is a no-op today but critical if you scale up.
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -166,12 +289,11 @@ affinity:
         - matchExpressions:
             - key: node-pool
               operator: In
-              values: ["ondemand-arm64"]   # hard pin — no other pool ever
+              values: ["ondemand-arm64"]
 
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       - topologyKey: kubernetes.io/hostname
-
 
 tolerations: []
 nodeSelector: {}
@@ -183,9 +305,5 @@ serviceAccount:
   annotations: {}
   name: ""
 
-
-
 nameOverride: ""
-# By default, the fullname of the resources will be based on the release name and chart name. You can override this with a custom name if needed.
-# needed for references to the service in the turn configuration, e.g. <fullname>.svc.cluster.local
-fullnameOverride: "livekit-server"  
+fullnameOverride: "livekit-server"
